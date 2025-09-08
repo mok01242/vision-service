@@ -1,52 +1,37 @@
 # app/ops/ocr.py
-import os, io, json
-from typing import Optional
-import numpy as np
-from PIL import Image
+import os, json, io
+from typing import Optional, Tuple
+from google.cloud import vision
 
-PROVIDER = os.getenv("OCR_PROVIDER", "none").lower()
+def _make_client() -> vision.ImageAnnotatorClient:
+    sa_json = os.environ.get("GCP_VISION_CREDENTIALS_JSON")
+    if not sa_json:
+        raise RuntimeError("GCP_VISION_CREDENTIALS_JSON is not set")
+    info = json.loads(sa_json)
+    return vision.ImageAnnotatorClient.from_service_account_info(info)
 
-def run_ocr(crop_bgr: np.ndarray) -> Optional[str]:
+def ocr_roi(image_bytes: bytes, roi: Optional[Tuple[int,int,int,int]] = None) -> str:
     """
-    crop_bgr: OpenCV BGR 이미지 조각(알약 영역)
-    return: 각인 텍스트(영숫자, 대문자, 최대 16자) 또는 None
+    image_bytes: 원본 이미지 바이트
+    roi: (x1, y1, x2, y2) 픽셀 좌표. 없으면 전체 영역 OCR
     """
-    if PROVIDER != "gcv":
-        return None
+    client = _make_client()
 
-    try:
-        # 지연 임포트: GCV 켠 경우에만 로드
-        from google.cloud import vision
-        from google.oauth2 import service_account
-
-        creds_json = os.getenv("GCV_CREDENTIALS_JSON")
-        if not creds_json:
-            return None
-
-        info = json.loads(creds_json)
-        creds = service_account.Credentials.from_service_account_info(info)
-        client = vision.ImageAnnotatorClient(credentials=creds)
-
-        # BGR -> RGB -> JPEG bytes
-        img_rgb = crop_bgr[:, :, ::-1]
-        pil = Image.fromarray(img_rgb)
+    # ROI 자르기(선택)
+    if roi:
+        from PIL import Image
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        x1, y1, x2, y2 = roi
+        im = im.crop((x1, y1, x2, y2))
         buf = io.BytesIO()
-        pil.save(buf, format="JPEG", quality=85)
-        gimg = vision.Image(content=buf.getvalue())
+        im.save(buf, format="JPEG")
+        content = buf.getvalue()
+    else:
+        content = image_bytes
 
-        lang_hints = os.getenv("GCV_LANG_HINTS", "en,ko").split(",")
-        resp = client.text_detection(
-            image=gimg, image_context={"language_hints": lang_hints}
-        )
-        if resp.error.message:
-            return None
+    image = vision.Image(content=content)
+    resp  = client.text_detection(image=image)
+    if resp.error.message:
+        raise RuntimeError(resp.error.message)
 
-        text = ""
-        if resp.full_text_annotation and resp.full_text_annotation.text:
-            text = resp.full_text_annotation.text
-
-        # 각인 정제: 영숫자만, 대문자, 길이 제한
-        cleaned = "".join(ch for ch in text.upper() if ch.isalnum())[:16]
-        return cleaned or None
-    except Exception:
-        return None
+    return resp.full_text_annotation.text.strip() if resp.full_text_annotation else ""
