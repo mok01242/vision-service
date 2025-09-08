@@ -1,4 +1,12 @@
 # app/main.py
+# 상단 import 근처에
+try:
+    from app.ops.ocr import ocr_roi
+except Exception:
+    # OCR 모듈이 없거나 실패해도 서비스가 죽지 않도록
+    def ocr_roi(image_bytes, bbox):
+        return None
+
 import io, os
 from typing import Any, Dict, List
 from fastapi import FastAPI, UploadFile, File, HTTPException
